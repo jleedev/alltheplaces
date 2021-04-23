@@ -1,10 +1,15 @@
 import csv
+from functools import partial
 import json
 import logging
 from pathlib import Path
 
 import h3
+import pyproj
+from pyproj.enums import TransformDirection
 import shapely
+import shapely.ops
+import shapely.geometry
 
 logging.basicConfig(
     format="%(asctime)-15s %(levelname)s %(module)s:%(lineno)s %(message)s",
@@ -17,8 +22,8 @@ OUTPUT_DIR = Path("./locations/regions/")
 # The smallest resolution we're going to prepare for. (We could produce a finer
 # resolution at runtime at the cost of covering more area than we'll need to,
 # having discarded finer details.)
-KM = 1.609344
-TARGET_RADIUS = 10 * KM
+MILE = 1.609344  # km
+TARGET_RADIUS = 10 * MILE
 
 res = 0
 while h3.edge_length(res) > TARGET_RADIUS:
@@ -30,6 +35,37 @@ admin_0 = json.load(open("ne_10m_admin_0_countries_lakes.geojson"))
 logging.debug("reading states/provinces geojson")
 admin_1 = json.load(open("ne_10m_admin_1_states_provinces_lakes.geojson"))
 logging.debug("done")
+
+# Ratio of the Mercator meter at the equator vs 72°N
+DISTANCE_FACTOR = 3
+
+mercator = pyproj.Transformer.from_crs(
+    crs_from=pyproj.CRS("WGS84"),
+    crs_to=pyproj.CRS("EPSG:3857"),
+    always_xy=True,
+)
+
+
+def _buffer_wrapper(shp, *args, **kwargs):
+    """
+    Project a shapely object to Mercator, buffer, then unproject.
+    """
+    inverse = partial(mercator.transform, direction=TransformDirection.INVERSE)
+    return shapely.ops.transform(
+        inverse,
+        shapely.ops.transform(mercator.transform, shp).buffer(*args, **kwargs),
+    )
+
+
+def buffer(geom, resolution):
+    """
+    Buffer the geometry at the appropriate cell size
+    """
+    shp = shapely.geometry.shape(geom)
+    buffer_distance = 1000 * h3.edge_length(resolution) * DISTANCE_FACTOR
+    shp = _buffer_wrapper(shp, buffer_distance)
+    geojson = shapely.geometry.mapping(shp)
+    return geojson
 
 
 def convert_multipolygon(geometry):
@@ -62,7 +98,8 @@ def build_country(output_path, features):
     logging.debug("reading %s features", len(features))
     hexs = set()
     for feat in features:
-        for polygon in convert_multipolygon(feat["geometry"]):
+        geometry = buffer(feat["geometry"], res)
+        for polygon in convert_multipolygon(geometry):
             hexs.update(h3.polyfill(polygon, res))
     logging.debug("produced %s hexes", len(hexs))
     compact = h3.compact(hexs)
@@ -73,7 +110,8 @@ def build_country(output_path, features):
         writer.writerows([hex_id] for hex_id in compact)
 
 
-build_country(
-    OUTPUT_DIR / "us.csv",
-    [feat for feat in admin_0["features"] if feat["properties"]["SOV_A3"] == "US1"],
-)
+if __name__ == "__main__":
+    build_country(
+        OUTPUT_DIR / "us.csv",
+        [feat for feat in admin_0["features"] if feat["properties"]["SOV_A3"] == "US1"],
+    )

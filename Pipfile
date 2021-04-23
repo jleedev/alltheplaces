@@ -8,6 +8,7 @@ awscli = "*"
 boto3 = "*"
 pylint = "*"
 shapely = "*"
+pyproj = "*"
 
 [packages]
 scrapy = "*"
